@@ -1,6 +1,17 @@
 import pandas as pd
 import numpy as np
-from textblob import TextBlob
+
+def calculate_daily_count(df):
+    """
+    Calculates daily message count for each user.
+    Returns: DataFrame [datetime, sender, count]
+    """
+    if df.empty:
+        return pd.DataFrame()
+        
+    daily_count = df.set_index('datetime').groupby([pd.Grouper(freq='D'), 'sender']).size().reset_index(name='count')
+    return daily_count
+
 def calculate_response_time_variance(df):
     """
     Calculates the variance of response times for each user.
@@ -70,41 +81,6 @@ def calculate_initiation_ratio(df, gap_hours=1.0):
             
     ratios = {k: v / total_initiations if total_initiations > 0 else 0 for k,v in initiations.items()}
     return ratios
-def analyze_sentiment(df, progress_callback=None):
-    """
-    Adds a 'sentiment' column to the dataframe using TextBlob.
-    Note: TextBlob is English-native. 
-    Returns: df with 'sentiment' column (-1 to 1).
-    """
-    if df.empty:
-        return df
-        
-    def get_sentiment(text):
-        try:
-            return TextBlob(str(text)).sentiment.polarity
-        except:
-            return 0.0
-            
-    # If no callback, just do it all at once
-    if not progress_callback:
-        df['sentiment'] = df['message'].apply(get_sentiment)
-        return df
-
-    # Chunk processing for progress
-    chunks = np.array_split(df, 10)
-    processed_chunks = []
-    
-    total_chunks = len(chunks)
-    for i, chunk in enumerate(chunks):
-        chunk = chunk.copy()
-        chunk['sentiment'] = chunk['message'].apply(get_sentiment)
-        processed_chunks.append(chunk)
-        
-        # Update progress (0.0 to 1.0)
-        progress = (i + 1) / total_chunks
-        progress_callback(progress)
-        
-    return pd.concat(processed_chunks)
 
 def calculate_simp_metrics(df):
     """
@@ -144,7 +120,7 @@ def calculate_simp_metrics(df):
                     
         sorted_kws = sorted(used_keywords.items(), key=lambda x: x[1], reverse=True)
         
-        metrics[u] = {
+        metrics[str(u)] = {
             'msg_count': msg_count,
             'avg_len': avg_len if not pd.isna(avg_len) else 0,
             'simp_kw_count': kw_count,
@@ -217,3 +193,170 @@ def get_specific_improvements(df, me):
                 
     # Return top 3 unique suggestions
     return improvements[:3]
+
+    return improvements[:3]
+
+def calculate_match_score(simp_metrics, users, stability_scores):
+    """
+    Calculates Match Suitability Score (0-100).
+    Factors:
+    1. Balance (50%): Msg count ratio.
+    2. Echo (30%): Avg length similarity.
+    3. Rhythm (20%): Stability score similarity.
+    """
+    try:
+        if len(users) < 2:
+            return 0, "需兩人以上才能計算"
+            
+        # Ensure we are using compatible types (str) for keys
+        u1 = str(users[0])
+        u2 = str(users[1])
+        
+        # 1. Balance Score (50%)
+        # Access with safe get, defaulting to 0/empty logic
+        m1 = simp_metrics.get(u1)
+        m2 = simp_metrics.get(u2)
+        
+        if not m1 or not m2:
+             # Fallback: try raw keys if casting failed upstream
+             return 0, "資料不足"
+             
+        c1 = m1['msg_count']
+        c2 = m2['msg_count']
+        
+        total = c1 + c2
+        if total == 0:
+            balance_ratio = 0.5
+        else:
+            balance_ratio = c1 / total
+        
+        balance_score = (1 - (abs(0.5 - balance_ratio) * 2)) * 100
+        
+        # 2. Echo Score (30%)
+        l1 = m1['avg_len']
+        l2 = m2['avg_len']
+        if max(l1, l2) == 0:
+            echo_score = 100
+        else:
+            echo_score = (min(l1, l2) / max(l1, l2)) * 100
+            
+        # 3. Rhythm Score (20%)
+        s1 = stability_scores.get(u1, 50)
+        s2 = stability_scores.get(u2, 50)
+        
+        rhythm_score = 100 - abs(s1 - s2)
+        
+        final_score = (balance_score * 0.5) + (echo_score * 0.3) + (rhythm_score * 0.2)
+        
+        verdict = "🤝 相當契合 (Good Match)"
+        if final_score >= 90:
+            verdict = "👩‍❤️‍👨 天作之合 (Soulmates)"
+        elif final_score >= 70:
+            verdict = "🤝 相當契合 (Good Match)"
+        elif final_score >= 40:
+            verdict = "🤏 普通朋友 (Just Friends)"
+        else:
+            verdict = "💥 頻率不對 (Mismatch)"
+            
+        return final_score, verdict
+    except Exception as e:
+        return 0, f"計算錯誤: {str(e)}"
+
+# Add jieba import at the top if not present, but for now we put it inside or global. 
+# Better to put global import at top, but since we are appending, let's just make sure it's handled.
+# Accessing file again to add import to top is best practice but appending here for tool usage efficiency for now?
+# No, let's do it properly. I will use multi_replace for imports + new function if I had to, but I'll validly just add import inside function or helper if lazy, but best is top.
+# Actually I will use read_file to check imports again? I did view_file before.
+# I will just write the function here and assume imports will be fixed or added.
+# Wait, I need to add `import jieba` at the top. I'll do a separate tool call or use `multi_replace`.
+# Let's use `multi_replace` to add import at top and function at bottom.
+
+def get_word_frequency(df, top_n=20):
+    """
+    Calculates word frequency using jieba.
+    Returns: Dict {user: [(word, count), ...]}
+    """
+    import jieba # Lazy import to avoid breaking if not installed yet (though we just did)
+    import re
+    
+    if df.empty:
+        return {}
+        
+    frequency = {}
+    users = df['sender'].unique()
+    
+    # Common Traditional Chinese stop words
+    stop_words = set([
+        "的", "了", "和", "是", "就", "都", "而", "及", "與", "著",
+        "或", "一個", "沒有", "我們", "你們", "他們", "它", "是否",
+        "但是", "雖然", "因此", "因為", "所以", "如果", "雖然",
+        "其實", "也是", "只是", "還是", "那個", "這個", "什麼",
+        "怎麼", "這裡", "那裡", "原本", "可能", "大概", "可以",
+        "覺得", "比較", "感覺", "好像", "不過", "這樣", "那樣",
+        "貼圖", "照片", "影片", "通話", "未接", "已讀", "收回",
+        "訊息", "檔案", "相簿", "記事本", "禮物", "應該", "真的",
+        "對啊", "哈哈", "哈哈哈", "呵呵", "嗯嗯", "喔喔", "就是",
+        "不要", "不會", "知道", "現在", "今天", "明天", "後來",
+        "一定", "看到", "有些", "這些", "那些", "然後", "有些",
+        "而且", "一種", "一些", "有點", "好吧", "好喔", "好啊",
+        "有點", "一點", "一下", "一次", "一直"
+    ])
+    
+    for u in users:
+        user_df = df[df['sender'] == u]
+        text_content = " ".join(user_df['message'].astype(str).tolist())
+        
+        # Simple cleaning
+        text_content = re.sub(r'[^\w\s]', '', text_content)
+        
+        words = jieba.cut(text_content)
+        
+        filtered_words = []
+        for w in words:
+            w = w.strip()
+            if len(w) > 1 and w not in stop_words and not w.isdigit():
+                filtered_words.append(w)
+                
+        # Count
+        word_counts = pd.Series(filtered_words).value_counts().head(top_n)
+        frequency[str(u)] = list(word_counts.items())
+        
+    return frequency
+
+def determine_theme(word_counts_list):
+    """
+    Determines a 'Yearly Theme' based on top words.
+    Input: List of (word, count) tuples from one or all users.
+    Returns: String (Theme Name)
+    """
+    if not word_counts_list:
+        return "👻 沉默是金 (Silence is Gold)"
+        
+    # Flatten just to words for easy checking
+    words = [w[0] for w in word_counts_list]
+    text_blob = " ".join(words)
+    
+    themes = {
+        "🍔 吃貨搭檔 (Foodie Couple)": ["吃", "餓", "飯", "麵", "喝", "飲料", "甜點", "好想吃", "去吃", "早安", "晚安", "宵夜"],
+        "💼 事業強人 (Hustle Mode)": ["忙", "開會", "加班", "累", "公司", "這週", "下班", "報告", "資料", "確認", "會議"],
+        "🥰 熱戀情侶 (Lovey Dovey)": ["想你", "愛你", "抱抱", "親親", "寶貝", "早安", "晚安", "喜歡", "可愛", "想見"],
+        "🎮 宅宅雙人組 (Geek Squad)": ["遊戲", "上線", "打", "看", "動漫", "番", "睡", "宅", "好笑", "影片"],
+        "💰 投資理財 (Wolf of Wall St)": ["錢", "買", "賣", "貴", "便宜", "股票", "匯率", "賺", "賠", "花錢"]
+    }
+    
+    scores = {k: 0 for k in themes}
+    
+    for theme, keywords in themes.items():
+        for kw in keywords:
+            # Simple substring match in the top words list
+            for w in words:
+                if kw in w:
+                    scores[theme] += 1
+                    
+    # Find max
+    best_theme = max(scores, key=scores.get)
+    
+    if scores[best_theme] == 0:
+        return "🤖 話癆二人組 (Chatty Bots)"
+        
+    return best_theme
